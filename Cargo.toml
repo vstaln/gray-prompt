@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.91"
 license = "MIT"
-description = "Layered prompt customization: global ~/.gray/prompt/custom.md + per-project .gray-prompt.md (port of pi's prompt-customizer)."
+description = "Layered global and per-project prompt customization"
 
 [[bin]]
 name = "gray-prompt"

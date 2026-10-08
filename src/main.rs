@@ -1,6 +1,5 @@
 //! gray-prompt — layered user prompt customization.
 //!
-//! Port of pi's `prompt-customizer` extension, adapted to the gray wire:
 //! `prompt/context` injects every customization file that exists —
 //! `<gray-home>/prompt/custom.md` (global) and
 //! `<session.cwd>/.gray-prompt.md` (per-project) — each capped at 8 KiB.
