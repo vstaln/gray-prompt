@@ -1,52 +1,108 @@
-//! gray-prompt — a gray sidecar plugin.
+//! gray-prompt — layered user prompt customization.
 //!
-//! With no arguments it speaks gray's NDJSON wire protocol on stdio: one JSON
-//! request per stdin line, one reply per stdout line. `gray-prompt manifest`
-//! prints the manifest for humans and `gray account check`.
+//! Port of pi's `prompt-customizer` extension, adapted to the gray wire:
+//! `prompt/context` injects every customization file that exists —
+//! `<gray-home>/prompt/custom.md` (global) and
+//! `<session.cwd>/.gray-prompt.md` (per-project) — each capped at 8 KiB.
+//! `/prompt` lists what the last injection actually sent.
 
 use std::io::{BufRead, Write};
+use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 use serde_json::{Value, json};
+
+/// Per-file byte cap.
+const CAP: usize = 8 * 1024;
+
+/// What the most recent `prompt/context` call injected: `(source, bytes)`.
+static LAST: Mutex<Vec<(String, usize)>> = Mutex::new(Vec::new());
 
 fn manifest() -> Value {
     json!({
         "name": "prompt",
         "version": env!("CARGO_PKG_VERSION"),
         "protocol": "1.1",
-        "tools": [{
-            "name": "prompt_hello",
-            "description": "Example tool from the gray-account template: greets `name`. Replace me.",
-            "parameters": {
-                "type": "object",
-                "properties": { "name": { "type": "string", "description": "Who to greet." } },
-                "required": ["name"]
-            }
-        }],
+        "tools": [],
         "commands": ["/prompt"],
+        "hooks": ["prompt/context"],
     })
 }
 
-/// A tool call. Return `Ok(text)` for the model, `Err(text)` for a tool error.
-fn call_tool(name: &str, args: &Value) -> Result<String, String> {
-    match name {
-        "prompt_hello" => {
-            let who = args.get("name").and_then(Value::as_str).unwrap_or("").trim();
-            if who.is_empty() {
-                return Err("missing required argument: name".into());
-            }
-            Ok(format!("hello, {who}!"))
+/// `<gray-home>/prompt/custom.md` — honors `$GRAY_HOME`, falls back to
+/// `$HOME/.gray`.
+fn global_file() -> PathBuf {
+    std::env::var_os("GRAY_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".gray")))
+        .unwrap_or_else(|| PathBuf::from(".gray"))
+        .join("prompt")
+        .join("custom.md")
+}
+
+/// The customization files, in injection order: global, then per-project.
+fn candidates(cwd: &Path) -> Vec<PathBuf> {
+    vec![global_file(), cwd.join(".gray-prompt.md")]
+}
+
+fn session_cwd(params: &Value) -> PathBuf {
+    params["session"]["cwd"]
+        .as_str()
+        .or_else(|| params["cwd"].as_str())
+        .map(PathBuf::from)
+        .or_else(|| std::env::current_dir().ok())
+        .unwrap_or_else(|| PathBuf::from("."))
+}
+
+/// Truncate at `max` bytes on a char boundary.
+fn truncate_utf8(s: &mut String, max: usize) {
+    if s.len() > max {
+        let mut end = max;
+        while !s.is_char_boundary(end) {
+            end -= 1;
         }
-        other => Err(format!("unknown tool: {other}")),
+        s.truncate(end);
     }
 }
 
-/// A slash command typed by the user (`/prompt …`). `argv` excludes the name.
-fn run_command(argv: &[&str]) -> String {
-    if argv.is_empty() {
-        format!("prompt {} — edit src/main.rs to make me useful", env!("CARGO_PKG_VERSION"))
-    } else {
-        format!("prompt got: {}", argv.join(" "))
+/// `prompt/context`: inject every customization file that exists. Also
+/// records the injection for `/prompt`.
+fn prompt_context(cwd: &Path) -> Value {
+    let mut out = String::new();
+    let mut injected: Vec<(String, usize)> = Vec::new();
+    for file in candidates(cwd) {
+        let Ok(mut body) = std::fs::read_to_string(&file) else { continue };
+        if body.trim().is_empty() {
+            continue;
+        }
+        truncate_utf8(&mut body, CAP);
+        if !out.is_empty() {
+            out.push_str("\n\n");
+        }
+        out.push_str("## ");
+        out.push_str(&file.display().to_string());
+        out.push_str("\n\n");
+        out.push_str(body.trim_end());
+        injected.push((file.display().to_string(), body.len()));
     }
+    *LAST.lock().unwrap() = injected;
+    if out.is_empty() { json!({}) } else { json!({ "text": out }) }
+}
+
+/// `/prompt` — what the last `prompt/context` call injected.
+fn run_command() -> String {
+    let last = LAST.lock().unwrap();
+    if last.is_empty() {
+        return format!(
+            "nothing injected yet — looked for {} and <cwd>/.gray-prompt.md",
+            global_file().display()
+        );
+    }
+    let mut lines = vec!["last prompt/context injected:".to_string()];
+    for (path, size) in last.iter() {
+        lines.push(format!("  {path} ({size} B, cap {CAP} B)"));
+    }
+    lines.join("\n")
 }
 
 /// One request → `Some(reply)`, or `None` for notifications. The bool asks
@@ -60,22 +116,8 @@ fn handle(req: &Value) -> (Option<Value>, bool) {
     };
     let result = match method {
         "plugin/manifest" => manifest(),
-        "tool/call" => {
-            let name = params.get("name").and_then(Value::as_str).unwrap_or("");
-            let args = params.get("args").cloned().unwrap_or(Value::Null);
-            match call_tool(name, &args) {
-                Ok(text) => json!({ "content": text }),
-                Err(text) => json!({ "content": text, "is_error": true }),
-            }
-        }
-        "command/run" => {
-            let argv: Vec<&str> = params
-                .get("argv")
-                .and_then(Value::as_array)
-                .map(|a| a.iter().filter_map(Value::as_str).collect())
-                .unwrap_or_default();
-            json!({ "text": run_command(&argv) })
-        }
+        "prompt/context" => prompt_context(&session_cwd(&params)),
+        "command/run" => json!({ "text": run_command() }),
         "plugin/shutdown" => return (Some(json!({ "id": id, "result": {} })), true),
         _ => {
             let error = json!({ "code": -32601, "message": "method not found" });
@@ -115,29 +157,94 @@ mod tests {
         handle(&json!({ "id": 1, "method": method, "params": params })).0.unwrap()
     }
 
+    /// A fresh temp dir that removes itself on drop.
+    struct TempDir(PathBuf);
+    impl TempDir {
+        fn new() -> Self {
+            let dir = std::env::temp_dir().join(format!(
+                "gray-prompt-test-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            std::fs::create_dir_all(&dir).unwrap();
+            Self(dir)
+        }
+    }
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// Env vars are process-global: serialize the tests that set GRAY_HOME.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+    struct EnvGuard;
+    impl EnvGuard {
+        fn set_home(dir: &TempDir) -> Self {
+            unsafe { std::env::set_var("GRAY_HOME", &dir.0) };
+            Self
+        }
+    }
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            unsafe { std::env::remove_var("GRAY_HOME") };
+        }
+    }
+
     #[test]
-    fn manifest_names_the_plugin_and_its_version() {
+    fn manifest_claims_prompt_context_and_prompt_command() {
         let m = call("plugin/manifest", Value::Null)["result"].clone();
         assert_eq!(m["name"], "prompt");
-        assert_eq!(m["version"], env!("CARGO_PKG_VERSION"));
+        assert_eq!(m["hooks"], json!(["prompt/context"]));
+        assert_eq!(m["commands"], json!(["/prompt"]));
     }
 
     #[test]
-    fn tool_call_returns_content() {
-        let r = call("tool/call", json!({ "name": "prompt_hello", "args": { "name": "gray" } }));
-        assert_eq!(r["result"]["content"], "hello, gray!");
-        assert!(r["result"].get("is_error").is_none());
+    fn injects_nothing_when_no_files() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let home = TempDir::new();
+        let _g = EnvGuard::set_home(&home);
+        let cwd = TempDir::new();
+        let r = call("prompt/context", json!({ "session": { "cwd": cwd.0 } }));
+        assert_eq!(r["result"], json!({}));
+        let r = call("command/run", json!({ "name": "/prompt", "argv": [] }));
+        assert!(r["result"]["text"]
+            .as_str()
+            .unwrap()
+            .contains("nothing injected"));
     }
 
     #[test]
-    fn tool_errors_are_flagged() {
-        let r = call("tool/call", json!({ "name": "prompt_hello", "args": {} }));
-        assert_eq!(r["result"]["is_error"], true);
+    fn injects_global_and_project_files() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let home = TempDir::new();
+        let _g = EnvGuard::set_home(&home);
+        std::fs::create_dir_all(home.0.join("prompt")).unwrap();
+        std::fs::write(home.0.join("prompt/custom.md"), "global prefs").unwrap();
+        let cwd = TempDir::new();
+        std::fs::write(cwd.0.join(".gray-prompt.md"), "project prefs").unwrap();
+        let r = call("prompt/context", json!({ "session": { "cwd": cwd.0 } }));
+        let text = r["result"]["text"].as_str().unwrap();
+        assert!(text.contains("global prefs") && text.contains("project prefs"));
+        assert!(text.find("global prefs").unwrap() < text.find("project prefs").unwrap());
+        let r = call("command/run", json!({ "name": "/prompt", "argv": [] }));
+        let listed = r["result"]["text"].as_str().unwrap();
+        assert!(listed.contains("custom.md") && listed.contains(".gray-prompt.md"));
     }
 
     #[test]
-    fn unknown_methods_are_method_not_found() {
-        assert_eq!(call("nope", Value::Null)["error"]["code"], -32601);
+    fn caps_each_file_at_8kib() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let home = TempDir::new();
+        let _g = EnvGuard::set_home(&home);
+        let cwd = TempDir::new();
+        std::fs::write(cwd.0.join(".gray-prompt.md"), "x".repeat(CAP + 4096)).unwrap();
+        let r = call("prompt/context", json!({ "session": { "cwd": cwd.0 } }));
+        let text = r["result"]["text"].as_str().unwrap();
+        assert!(text.matches('x').count() <= CAP);
     }
 
     #[test]
@@ -146,5 +253,10 @@ mod tests {
         assert!(reply.is_some() && exit);
         let (reply, exit) = handle(&json!({ "method": "plugin/shutdown" }));
         assert!(reply.is_none() && exit);
+    }
+
+    #[test]
+    fn unknown_methods_are_method_not_found() {
+        assert_eq!(call("nope", Value::Null)["error"]["code"], -32601);
     }
 }
