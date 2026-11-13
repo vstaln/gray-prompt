@@ -25,6 +25,7 @@ fn manifest() -> Value {
         "tools": [],
         "description": "layered",
         "commands": ["/prompt"],
+        "command_descriptions": {"/prompt": "list injected prompt customization files"},
         "hooks": ["prompt/context"],
     })
 }
