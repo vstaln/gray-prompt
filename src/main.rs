@@ -70,7 +70,9 @@ fn prompt_context(cwd: &Path) -> Value {
     let mut out = String::new();
     let mut injected: Vec<(String, usize)> = Vec::new();
     for file in candidates(cwd) {
-        let Ok(mut body) = std::fs::read_to_string(&file) else { continue };
+        let Ok(mut body) = std::fs::read_to_string(&file) else {
+            continue;
+        };
         if body.trim().is_empty() {
             continue;
         }
@@ -85,7 +87,11 @@ fn prompt_context(cwd: &Path) -> Value {
         injected.push((file.display().to_string(), body.len()));
     }
     *LAST.lock().unwrap() = injected;
-    if out.is_empty() { json!({}) } else { json!({ "text": out }) }
+    if out.is_empty() {
+        json!({})
+    } else {
+        json!({ "text": out })
+    }
 }
 
 /// `/prompt` — what the last `prompt/context` call injected.
@@ -135,7 +141,9 @@ fn main() -> std::io::Result<()> {
     let mut stdout = std::io::stdout();
     for line in stdin.lock().lines() {
         let line = line?;
-        let Ok(req) = serde_json::from_str::<Value>(&line) else { continue };
+        let Ok(req) = serde_json::from_str::<Value>(&line) else {
+            continue;
+        };
         let (reply, exit) = handle(&req);
         if let Some(reply) = reply {
             writeln!(stdout, "{reply}")?;
@@ -153,7 +161,9 @@ mod tests {
     use super::*;
 
     fn call(method: &str, params: Value) -> Value {
-        handle(&json!({ "id": 1, "method": method, "params": params })).0.unwrap()
+        handle(&json!({ "id": 1, "method": method, "params": params }))
+            .0
+            .unwrap()
     }
 
     /// A fresh temp dir that removes itself on drop.
@@ -210,10 +220,12 @@ mod tests {
         let r = call("prompt/context", json!({ "session": { "cwd": cwd.0 } }));
         assert_eq!(r["result"], json!({}));
         let r = call("command/run", json!({ "name": "/prompt", "argv": [] }));
-        assert!(r["result"]["text"]
-            .as_str()
-            .unwrap()
-            .contains("nothing injected"));
+        assert!(
+            r["result"]["text"]
+                .as_str()
+                .unwrap()
+                .contains("nothing injected")
+        );
     }
 
     #[test]
@@ -243,7 +255,8 @@ mod tests {
         std::fs::write(cwd.0.join(".gray-prompt.md"), "x".repeat(CAP + 4096)).unwrap();
         let r = call("prompt/context", json!({ "session": { "cwd": cwd.0 } }));
         let text = r["result"]["text"].as_str().unwrap();
-        assert!(text.matches('x').count() <= CAP);
+        let body = text.split("\n\n").nth(1).unwrap();
+        assert_eq!(body.len(), CAP);
     }
 
     #[test]
