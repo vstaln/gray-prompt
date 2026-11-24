@@ -1,22 +1,11 @@
-//! gray-prompt — layered prompt customization plus input shaping, one sidecar.
 //!
-//! The `custom` part is gray-prompt's own behaviour: `prompt/context` injects
-//! `<gray-home>/prompt/custom.md` and `<session.cwd>/.gray-prompt.md`, each
-//! capped at 8 KiB, and `/prompt` lists what the last injection sent.
 //!
-//! The `commands`, `preset`, `transform` and `inline-bash` parts come from
-//! gray-input, each in `mods/` nearly verbatim with its own `~/.gray/<orig>/`
-//! state and slash commands. Only the wire plumbing is shared.
 //!
 //! `input/submit` is a CHAIN in fixed order:
 //!   commands → preset → transform → inline-bash
 //! Each stage gets the text the previous stage produced. `{text}` rewrites
 //! the input and moves on, `{handled: true}` swallows it and stops the
-//! chain, and `{}` (or method-not-found) passes it on unchanged.
 //!
-//! `command/run` routes by `params.name`: `/prompt` → custom, `/cmd` →
-//! commands, `/preset` → preset, `/transform` → transform, `/inline` →
-//! inline-bash.
 
 use std::collections::HashMap;
 use std::io::{BufRead, Write};
