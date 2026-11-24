@@ -4,3 +4,6 @@
 # RSS inside RAM on a loaded desktop; override per run with
 # CARGO_BUILD_JOBS (an env var wins over this file).
 jobs = 6
+
+[env]
+RUST_TEST_THREADS = "1"
